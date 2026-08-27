@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SideKick</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1>🌀 SideKick</h1>
+            <p class="caption">Human-selected context, request-scoped filesystem permissions, precise edits only.</p>
+        </header>
+
+        <div class="layout">
+            <!-- Sidebar: workspace context -->
+            <aside class="sidebar">
+                <h2>Workspace</h2>
+
+                <label for="root">Root directory</label>
+                <input id="root" type="text" placeholder="/home/me/projects/myapp">
+
+                <label for="files">Files to provide</label>
+                <textarea id="files" placeholder="src/auth.py&#10;src/session.py&#10;src/models/*" rows="8"></textarea>
+                <p class="hint">Supports <code>*</code> patterns, e.g. <code>src/models/*</code>.</p>
+            </aside>
+
+            <!-- Main area -->
+            <main class="main">
+                <h2>Task</h2>
+                <textarea id="task" placeholder="Fix the refresh-token race condition and update the relevant tests." rows="8"></textarea>
+
+                <div class="btn-row">
+                    <button id="run-btn" class="primary">Run Agent</button>
+                    <button id="llm-btn" class="llm">Ask LLM</button>
+                </div>
+
+                <div id="error" class="error" hidden></div>
+
+                <!-- File Creation Approval Dialog -->
+                <div id="approval" class="approval" hidden>
+                    <p class="approval-title">⚠️ Action Required: File Creation Requested</p>
+                    <pre id="approval-json"></pre>
+                    <div class="approval-actions">
+                        <button id="approve-btn" class="primary">Approve Creation</button>
+                        <button id="reject-btn">Reject Creation</button>
+                    </div>
+                </div>
+
+                <!-- Run status / logs -->
+                <div id="status" class="status" hidden>
+                    <div class="status-label" id="status-label">Running agent…</div>
+                    <pre id="logs" class="logs"></pre>
+                </div>
+
+                <!-- Results -->
+                <div id="results" class="results" hidden>
+                    <hr>
+                    <h3>Final summary</h3>
+                    <div id="summary" class="summary"></div>
+
+                    <h3>Changed files</h3>
+                    <div id="changed-files"></div>
+                </div>
+
+                <!-- LLM answer (separate from agent results) -->
+                <div id="llm-answer" class="results llm-answer" hidden>
+                    <hr>
+                    <h3>LLM answer</h3>
+                    <div id="llm-text" class="summary"></div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
