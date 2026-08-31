@@ -36,6 +36,38 @@ class StatusResponse(BaseModel):
     token_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
+class User(BaseModel):
+    id: str
+    name: str
+    uname: str
+    upass: str
+    folder: str
+
+
+class RegisterRequest(BaseModel):
+    name: str = Field(..., description="Display name")
+    uname: str = Field(..., description="Username")
+    upass: str = Field(..., description="Password")
+    folder: str = Field(..., description="Workspace folder")
+
+
+class LoginRequest(BaseModel):
+    uname: str = Field(..., description="Username")
+    upass: str = Field(..., description="Password")
+
+
+class LoginResponse(BaseModel):
+    id: str
+    name: str
+    uname: str
+    folder: str
+    token: Optional[str] = None
+
+
+class LogoutResponse(BaseModel):
+    message: str
+
+
 class LLMRequest(BaseModel):
     prompt: str = Field(..., description="Prompt to send to the model")
     system: Optional[str] = Field(None, description="Optional system message")

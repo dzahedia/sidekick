@@ -282,3 +282,155 @@ button.primary:hover:not(:disabled) {
     max-height: 400px;
     overflow: auto;
 }
+
+.user-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.user-name {
+    font-weight: 600;
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.logout-btn {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--danger);
+    border-color: #f3c2c4;
+    background: #fef2f2;
+}
+
+.logout-btn:hover:not(:disabled) {
+    border-color: var(--danger);
+    background: #fee2e2;
+}
+
+.sidebar-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 24px 0 16px;
+}
+
+.metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 300px;
+    overflow: auto;
+}
+
+.metric {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+.metric-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.metric-task {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.metric-status {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+.metric-status.success {
+    background: #dcfce7;
+    color: var(--success);
+}
+
+.metric-status.error {
+    background: #fee2e2;
+    color: var(--danger);
+}
+
+.metric-meta {
+    color: var(--muted);
+    font-size: 11px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.metrics .empty {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.login-wrap {
+    display: flex;
+    justify-content: center;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    box-shadow: var(--shadow);
+}
+
+.login-card h2 {
+    margin: 0 0 8px;
+    font-size: 20px;
+}
+
+.login-card .btn-row {
+    margin-top: 20px;
+}
+
+.login-card .btn-row button {
+    flex: 1 1 auto;
+}
+
+.login-card .btn-row .user-name {
+    flex: 0 0 auto;
+    align-self: center;
+    color: #000;
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40%;
+}
+
+.card-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 24px 0 16px;
+}
+
+.error.success {
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+    color: #15803d;
+}

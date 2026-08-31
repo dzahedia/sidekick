@@ -16,6 +16,11 @@
         <div class="layout">
             <!-- Sidebar: workspace context -->
             <aside class="sidebar">
+                <div class="user-bar">
+                    <span id="user-name" class="user-name"></span>
+                    <button id="logout-btn" class="logout-btn">Logout</button>
+                </div>
+
                 <h2>Workspace</h2>
 
                 <label for="root">Root directory</label>
@@ -24,6 +29,10 @@
                 <label for="files">Files to provide</label>
                 <textarea id="files" placeholder="src/auth.py&#10;src/session.py&#10;src/models/*" rows="8"></textarea>
                 <p class="hint">Supports <code>*</code> patterns, e.g. <code>src/models/*</code>.</p>
+
+                <hr class="sidebar-divider">
+                <h2>Metrics</h2>
+                <div id="metrics" class="metrics"></div>
             </aside>
 
             <!-- Main area -->

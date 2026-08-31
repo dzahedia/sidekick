@@ -16,10 +16,14 @@ const summaryEl = document.getElementById("summary");
 const changedFilesEl = document.getElementById("changed-files");
 const llmAnswerEl = document.getElementById("llm-answer");
 const llmTextEl = document.getElementById("llm-text");
+const metricsEl = document.getElementById("metrics");
+const userNameEl = document.getElementById("user-name");
+const logoutBtn = document.getElementById("logout-btn");
 
 let currentThreadId = null;
 let pollTimer = null;
 let logOffset = 0; // cursor: how many log lines we've already rendered
+let metricsTimer = null;
 
 function showError(message) {
     errorEl.textContent = message;
@@ -103,6 +107,50 @@ function renderResults(status) {
     resultsEl.hidden = false;
 }
 
+function renderMetrics(metrics) {
+    metricsEl.innerHTML = "";
+    // The API returns metrics newest first; only show the most recent one.
+    const m = metrics && metrics.length ? metrics[0] : null;
+    if (!m) {
+        const div = document.createElement("div");
+        div.className = "empty";
+        div.textContent = "No metrics recorded yet.";
+        metricsEl.appendChild(div);
+        return;
+    }
+    const card = document.createElement("div");
+    card.className = "metric";
+
+    const meta = document.createElement("div");
+    meta.className = "metric-meta";
+    const parts = [];
+    if (m.duration_seconds != null) parts.push(`duration: ${m.duration_seconds.toFixed(2)}s`);
+    if (m.token_usage) {
+        const t = m.token_usage;
+        parts.push(`tokens: ${t.total_tokens ?? "?"} (in ${t.input_tokens ?? "?"} / out ${t.output_tokens ?? "?"})`);
+    }
+    meta.textContent = parts.join(" · ");
+
+    card.appendChild(meta);
+    metricsEl.appendChild(card);
+}
+
+async function refreshMetrics() {
+    try {
+        const res = await fetch("/api/metrics");
+        if (!res.ok) return;
+        const body = await res.json();
+        renderMetrics(body.metrics || []);
+    } catch {
+        // Best effort: metrics are non-critical.
+    }
+}
+
+function startMetricsPolling() {
+    if (metricsTimer) return;
+    metricsTimer = setInterval(refreshMetrics, 3000);
+}
+
 function renderApproval(pending) {
     if (pending) {
         approvalJson.textContent = JSON.stringify(pending, null, 2);
@@ -145,10 +193,12 @@ function pollStatus(threadId) {
                 stopPolling();
                 setRunning(false);
                 showError(status.error || "Unknown error.");
+                refreshMetrics();
             } else if (status.status === "complete") {
                 stopPolling();
                 setRunning(false);
                 renderResults(status);
+                refreshMetrics();
             }
         } catch (err) {
             stopPolling();
@@ -294,6 +344,71 @@ async function startLLM() {
 
 runBtn.addEventListener("click", startRun);
 llmBtn.addEventListener("click", startLLM);
+logoutBtn.addEventListener("click", handleLogout);
 approveBtn.addEventListener("click", () => sendDecision(true));
 rejectBtn.addEventListener("click", () => sendDecision(false));
 
+// Restore the logged-in user's session (stored by login.js) and pre-fill the
+// workspace root with the user's home folder so the app is ready to use.
+function restoreSession() {
+    try {
+        const raw = sessionStorage.getItem("sidekick_user");
+        if (!raw) {
+            window.location.replace("/");
+            return false;
+        }
+        const user = JSON.parse(raw);
+        if (!user || !user.token) {
+            sessionStorage.removeItem("sidekick_user");
+            window.location.replace("/");
+            return false;
+        }
+        if (user && user.folder) {
+            rootInput.value = user.folder;
+        }
+        if (user && user.name) {
+            userNameEl.textContent = user.name;
+        }
+        return true;
+    } catch {
+        sessionStorage.removeItem("sidekick_user");
+        window.location.replace("/");
+        return false;
+    }
+}
+
+async function handleLogout() {
+    // Read the stored session so we can send the token to the server and
+    // clear every piece of user data we persisted locally.
+    let user = null;
+    try {
+        const raw = sessionStorage.getItem("sidekick_user");
+        if (raw) user = JSON.parse(raw);
+    } catch {
+        user = null;
+    }
+
+    try {
+        const headers = {};
+        if (user && user.token) {
+            headers["Authorization"] = `Bearer ${user.token}`;
+        }
+        await fetch("/api/logout", { method: "POST", headers });
+    } catch {
+        // Best effort: clearing the local session is what matters.
+    }
+
+    // Clear all locally stored user data (session + local storage).
+    sessionStorage.removeItem("sidekick_user");
+    localStorage.removeItem("sidekick_user");
+    window.location.href = "/";
+}
+
+const hasSession = restoreSession();
+
+// Show any metrics recorded by previous runs (e.g. after a page reload),
+// then keep the sidebar metrics fresh on a light interval.
+if (hasSession) {
+    refreshMetrics();
+    startMetricsPolling();
+}

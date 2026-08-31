@@ -1,6 +1,10 @@
+import hashlib
 import json
+import secrets
+import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -14,9 +18,24 @@ from fastapi.templating import Jinja2Templates
 from sidekick.agent.graph import run_agent
 from sidekick.filesystem.workspace import WorkspaceError
 from sidekick.models.qwen import get_model
-from sidekick.utils.utils import expand_file_patterns
+from sidekick.utils.utils import (
+    UserValidationError,
+    expand_file_patterns,
+    metric_collector,
+    validate_user,
+)
 
-from .schemas import ResumeRequest, RunRequest, RunResponse, StatusResponse, LLMRequest
+from .schemas import (
+    LoginRequest,
+    LoginResponse,
+    LogoutResponse,
+    RegisterRequest,
+    ResumeRequest,
+    RunRequest,
+    RunResponse,
+    StatusResponse,
+    LLMRequest,
+)
 
 load_dotenv()
 
@@ -24,10 +43,181 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = BASE_DIR / "api/templates"
 STATIC_DIR = BASE_DIR / "api/static"
 
-app = FastAPI(title="SideKick", description="FastAPI port of the Streamlit SideKick app")
+app = FastAPI(title="SideKick", description="SideKick agent API")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+
+# --- Authentication -------------------------------------------------------
+# Users are persisted in a local SQLite database. Passwords are stored hashed
+# (SHA-256 with a per-user salt) so the raw password is never kept on disk.
+
+DB_PATH = BASE_DIR / "api" / "users.db"
+_db_lock = threading.Lock()
+
+
+def _get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    with _db_lock, _get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                                                 id TEXT PRIMARY KEY,
+                                                 name TEXT NOT NULL,
+                                                 uname TEXT NOT NULL UNIQUE,
+                                                 salt TEXT NOT NULL,
+                                                 upass_hash TEXT NOT NULL,
+                                                 folder TEXT NOT NULL
+            )
+            """
+        )
+        # Active users are whitelisted by an admin. A user can only log in
+        # once their username has been added to this table.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS active_users (
+                                                 uname TEXT PRIMARY KEY,
+                                                 created_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def _hash_password(upass: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{upass}".encode("utf-8")).hexdigest()
+
+
+def _register_user(name: str, uname: str, upass: str, folder: str) -> Dict[str, Any]:
+    """Validate and register a user in SQLite, returning the stored record (no password)."""
+    clean = validate_user(name, uname, upass, folder)
+    salt = secrets.token_hex(16)
+    record = {
+        "id": uuid4().hex,
+        "name": clean["name"],
+        "uname": clean["uname"],
+        "salt": salt,
+        "upass_hash": _hash_password(clean["upass"], salt),
+        "folder": clean["folder"],
+    }
+    with _db_lock, _get_db() as conn:
+        conn.execute(
+            "INSERT INTO users (id, name, uname, salt, upass_hash, folder) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record["id"],
+                record["name"],
+                record["uname"],
+                record["salt"],
+                record["upass_hash"],
+                record["folder"],
+            ),
+        )
+    return record
+
+
+def _get_user(uname: str) -> Optional[Dict[str, Any]]:
+    with _db_lock, _get_db() as conn:
+        row = conn.execute(
+            "SELECT id, name, uname, salt, upass_hash, folder FROM users WHERE uname = ?",
+            (uname,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _is_active_user(uname: str) -> bool:
+    """Return True if the username has been whitelisted by an admin."""
+    with _db_lock, _get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM active_users WHERE uname = ?",
+            (uname,),
+        ).fetchone()
+    return row is not None
+
+
+def _public_user(record: Dict[str, Any]) -> Dict[str, str]:
+    """Return a user record without the password hash or salt."""
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "uname": record["uname"],
+        "folder": record["folder"],
+    }
+
+
+# In-memory set of currently valid session tokens (Bearer tokens).
+_active_sessions: set = set()
+
+
+# Initialize the database and seed a default user so the app is usable out of the box.
+_init_db()
+try:
+    _register_user("Admin", "admin", "admin1234", str(BASE_DIR))
+except (UserValidationError, sqlite3.IntegrityError):
+    pass
+# Ensure the default admin is whitelisted so the app is usable out of the box.
+with _db_lock, _get_db() as conn:
+    conn.execute(
+        "INSERT OR IGNORE INTO active_users (uname, created_at) VALUES (?, ?)",
+        ("admin", datetime.now(timezone.utc).isoformat()),
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request=request, name="login.html")
+
+
+@app.get("/", response_class=HTMLResponse)
+def root(request: Request) -> HTMLResponse:
+    """Render the login page at the public entry point."""
+    return templates.TemplateResponse(request=request, name="login.html")
+
+
+@app.post("/api/register", response_model=LoginResponse)
+def register(payload: RegisterRequest) -> LoginResponse:
+    try:
+        record = _register_user(payload.name, payload.uname, payload.upass, payload.folder)
+    except UserValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Username already exists.")
+    return LoginResponse(**_public_user(record))
+
+
+@app.post("/api/login", response_model=LoginResponse)
+def login(payload: LoginRequest) -> LoginResponse:
+    record = _get_user(payload.uname.strip())
+    if record is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    if not secrets.compare_digest(
+            _hash_password(payload.upass, record["salt"]), record["upass_hash"]
+    ):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    if not _is_active_user(record["uname"]):
+        raise HTTPException(
+            status_code=403,
+            detail="Account is not yet activated. Please wait for an admin to approve your username.",
+        )
+
+    token = secrets.token_urlsafe(32)
+    _active_sessions.add(token)
+    response = _public_user(record)
+    response["token"] = token
+    return LoginResponse(**response)
+
+
+@app.post("/api/logout", response_model=LogoutResponse)
+def logout(request: Request) -> LogoutResponse:
+    # The session token is carried in the Authorization header (Bearer token).
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        _active_sessions.discard(auth[len("Bearer "):])
+    return LogoutResponse(message="Logged out.")
 
 
 # Finished sessions are kept for this long (seconds) so a client can still
@@ -39,7 +229,7 @@ MAX_SESSIONS = 100
 
 
 class Session:
-    """Holds per-thread run state, mirroring the Streamlit session_state."""
+    """Holds per-thread run state for a single agent run."""
 
     def __init__(self, thread_id: str):
         self.thread_id = thread_id
@@ -138,11 +328,11 @@ def _evict_sessions_locked() -> None:
 
 
 def _run_agent_in_background(
-    session: Session,
-    root: str,
-    files: List[str],
-    task: str,
-    resume_decision: Optional[bool] = None,
+        session: Session,
+        root: str,
+        files: List[str],
+        task: str,
+        resume_decision: Optional[bool] = None,
 ) -> None:
     """Run the agent in a worker thread, updating the session as it goes."""
 
@@ -177,21 +367,49 @@ def _run_agent_in_background(
                 session.token_usage = result.get("token_usage", {}) # <--- Update session token usage
                 session.pending_interrupt = None
                 session.mark_finished()
-                print(f"[Thread {session.thread_id}] Token Usage: {session.token_usage}")
+                metric_collector.record(
+                    root=root,
+                    files=files,
+                    task=task,
+                    token_usage=session.token_usage,
+                    duration_seconds=session.finished_at - session.created_at,
+                    status="success",
+                    thread_id=session.thread_id,
+                )
 
     except WorkspaceError as exc:
         with session._lock:
             session.status = "error"
             session.error = f"Workspace validation failed: {exc}"
             session.mark_finished()
+            metric_collector.record(
+                root=root,
+                files=files,
+                task=task,
+                token_usage=session.token_usage,
+                duration_seconds=session.finished_at - session.created_at,
+                status="error",
+                error=session.error,
+                thread_id=session.thread_id,
+            )
     except Exception as exc:  # noqa: BLE001
         with session._lock:
             session.status = "error"
             session.error = f"Agent/model error: {exc}"
             session.mark_finished()
+            metric_collector.record(
+                root=root,
+                files=files,
+                task=task,
+                token_usage=session.token_usage,
+                duration_seconds=session.finished_at - session.created_at,
+                status="error",
+                error=session.error,
+                thread_id=session.thread_id,
+            )
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/app", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request=request, name="index.html")
 
@@ -245,14 +463,19 @@ def resume_run_thread(thread_id: str, payload: ResumeRequest) -> RunResponse:
     session = _get_session(thread_id)
     if session is None:
         raise HTTPException(status_code=404, detail="No active run to resume.")
-    if session.run_input is None:
-        raise HTTPException(status_code=400, detail="No active run to resume.")
 
+    # Atomically claim the resume so two concurrent /api/resume calls on the
+    # same thread cannot both spawn an agent thread. The claim is released
+    # once the run finishes (see _run_agent_in_background).
     with session._lock:
+        if session.run_input is None:
+            raise HTTPException(status_code=400, detail="No active run to resume.")
+        if session.status == "running":
+            raise HTTPException(status_code=409, detail="Run is already in progress.")
         session.status = "running"
         session.pending_interrupt = None
+        run_input = session.run_input
 
-    run_input = session.run_input
     thread = threading.Thread(
         target=_run_agent_in_background,
         args=(session, run_input["root"], run_input["files"], run_input["task"], payload.decision),
@@ -274,6 +497,12 @@ def get_status(thread_id: str, since: int = 0) -> StatusResponse:
         raise HTTPException(status_code=404, detail="Unknown thread_id.")
     with session._lock:
         return session.to_status(since=since)
+
+
+@app.get("/api/metrics")
+def get_metrics(limit: int = 50) -> Dict[str, Any]:
+    """Return the most recent collected metrics, newest first."""
+    return {"metrics": metric_collector.get_metrics(limit=limit)}
 
 
 @app.post("/api/clear/{thread_id}")

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SideKick — Login</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1>🌀 SideKick</h1>
+            <p class="caption">Sign in to continue.</p>
+        </header>
+
+        <div class="login-wrap">
+            <form id="login-form" class="login-card">
+                <h2>Login</h2>
+
+                <label for="uname">Username</label>
+                <input id="uname" name="uname" type="text" autocomplete="username" required>
+
+                <label for="upass">Password</label>
+                <input id="upass" name="upass" type="password" autocomplete="current-password" required>
+
+                <div id="login-error" class="error" hidden></div>
+
+                <div class="btn-row">
+                    <button type="submit" class="primary">Login</button>
+                    <span id="user-name" class="user-name"></span>
+                    <button type="button" id="logout-btn">Logout</button>
+                </div>
+
+            </form>
+
+            <form id="register-form" class="login-card">
+                <hr class="card-divider">
+
+                <h2>Register</h2>
+
+                <label for="reg-name">Name</label>
+                <input id="reg-name" name="reg-name" type="text" autocomplete="name" required>
+
+                <label for="reg-uname">Username</label>
+                <input id="reg-uname" name="reg-uname" type="text" autocomplete="username" required>
+
+                <label for="reg-upass">Password</label>
+                <input id="reg-upass" name="reg-upass" type="password" autocomplete="new-password" required>
+
+                <label for="reg-folder">Workspace folder</label>
+                <input id="reg-folder" name="reg-folder" type="text" autocomplete="off" required>
+                <p class="hint">Absolute path to an existing directory.</p>
+
+                <div id="register-error" class="error" hidden></div>
+
+                <div class="btn-row">
+                    <button type="submit" id="register-btn" class="primary">Register</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/login.js"></script>
+</body>
+</html>
