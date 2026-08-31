@@ -74,6 +74,12 @@ The agent is built on top of a large language model (LLM) and needs credentials 
 | `LLM_MODEL` | Model name to use (e.g. `qwen3.8:30b`). Defaults to a sensible built-in value. |
 | `APPROVE_FILE_CREATION` | When set to `t` or `true`, file creation is auto-approved (no manual approval prompt). |
 
+## my .env
+LLM_API_KEY=ollama
+LLM_MODEL=gemma4:cloud
+LLM_BASE_URL=http://localhost:11434/v1
+APPROVE_FILE_CREATION=t
+
 ## How it works
 
 The agent is intentionally constrained to keep token usage low and edits precise:
