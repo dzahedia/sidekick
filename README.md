@@ -1,6 +1,6 @@
 # Local Coding Agent
 
-> **Version 0.75** — see [Changelog](#changelog) for release history.
+> **Version 1.0** — see [Changelog](#changelog) for release history.
 
 This is a **highly focused** coding agent that operates exclusively on a small, explicitly selected set of files provided by the user. By limiting its scope, it keeps token usage **low and predictable** while enabling precise, targeted edits.
 
@@ -93,3 +93,5 @@ Token usage is tracked per run and reported in the `token_usage` field of the st
 
 - **0.5** — Initial release.
 - **0.75** — Added direct LLM call (no agent loop).
+- **1.0** — Added user managment.
+
