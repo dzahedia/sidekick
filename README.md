@@ -51,6 +51,18 @@ When the run finishes, a **results** section appears with:
 - **Final summary** — the agent's summary of what it did.
 - **Changed files** — the list of files that were modified.
 
+## User Management
+
+Users can register themselves through the application, but they must be activated by an administrator before they can gain access. Additionally, each user must provide a folder name during registration; all root directories they use must start with this folder name.
+
+To activate a user (add them to the whitelist), you can run the `add_active_user.py` script:
+
+```bash
+uv run python src/add_active_user.py
+```
+
+Note: The user must already exist in the `users` table of the database. You can also import `activate_user` from `src/add_active_user.py` to activate users programmatically.
+
 ## Configuration
 
 The agent is built on top of a large language model (LLM) and needs credentials to call it. Configure the following environment variables (or a `.env` file at the project root):
