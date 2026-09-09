@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import threading
@@ -10,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,6 +20,7 @@ from sidekick.agent.graph import run_agent
 from sidekick.filesystem.workspace import WorkspaceError
 from sidekick.models.qwen import get_model
 from sidekick.utils.utils import (
+    MAX_BUFFERED_METRICS,
     UserValidationError,
     expand_file_patterns,
     metric_collector,
@@ -53,7 +55,8 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # Users are persisted in a local SQLite database. Passwords are stored hashed
 # (SHA-256 with a per-user salt) so the raw password is never kept on disk.
 
-DB_PATH = BASE_DIR / "api" / "users.db"
+# Override with SIDEKICK_DB_PATH (e.g. in tests or deployments).
+DB_PATH = Path(os.getenv("SIDEKICK_DB_PATH", str(BASE_DIR / "api" / "users.db")))
 _db_lock = threading.Lock()
 
 
@@ -149,8 +152,52 @@ def _public_user(record: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-# In-memory set of currently valid session tokens (Bearer tokens).
-_active_sessions: set = set()
+# In-memory map of valid Bearer tokens to the public user record they belong
+# to. Tokens are bound to a user so every API call can enforce that user's
+# folder restriction and thread ownership.
+_active_sessions: Dict[str, Dict[str, Any]] = {}
+_active_sessions_lock = threading.Lock()
+
+
+def _bearer_token(request: Request) -> Optional[str]:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[len("Bearer "):].strip()
+        return token or None
+    return None
+
+
+def _current_user(request: Request) -> Dict[str, Any]:
+    """FastAPI dependency: resolve the Bearer token to a logged-in user or 401."""
+    token = _bearer_token(request)
+    if token is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    with _active_sessions_lock:
+        user = _active_sessions.get(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+    return user
+
+
+def _assert_root_allowed(root: str, user: Dict[str, Any]) -> None:
+    """Reject a workspace root that lies outside the user's registered folder.
+
+    Every user registers a folder; all roots they run the agent against must be
+    that folder or a directory inside it. The check is done on resolved paths so
+    ``..`` segments and symlinks cannot be used to escape.
+    """
+    folder = Path(user["folder"]).resolve()
+    try:
+        root_path = Path(root).expanduser().resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise HTTPException(status_code=400, detail=f"Root directory does not exist: {root}")
+    try:
+        root_path.relative_to(folder)
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Root directory must be inside your registered folder: {folder}",
+        )
 
 
 # Initialize the database and seed a default user so the app is usable out of the box.
@@ -205,8 +252,10 @@ def login(payload: LoginRequest) -> LoginResponse:
         )
 
     token = secrets.token_urlsafe(32)
-    _active_sessions.add(token)
-    response = _public_user(record)
+    public = _public_user(record)
+    with _active_sessions_lock:
+        _active_sessions[token] = public
+    response = dict(public)
     response["token"] = token
     return LoginResponse(**response)
 
@@ -214,9 +263,10 @@ def login(payload: LoginRequest) -> LoginResponse:
 @app.post("/api/logout", response_model=LogoutResponse)
 def logout(request: Request) -> LogoutResponse:
     # The session token is carried in the Authorization header (Bearer token).
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        _active_sessions.discard(auth[len("Bearer "):])
+    token = _bearer_token(request)
+    if token is not None:
+        with _active_sessions_lock:
+            _active_sessions.pop(token, None)
     return LogoutResponse(message="Logged out.")
 
 
@@ -231,8 +281,11 @@ MAX_SESSIONS = 100
 class Session:
     """Holds per-thread run state for a single agent run."""
 
-    def __init__(self, thread_id: str):
+    def __init__(self, thread_id: str, owner: str = ""):
         self.thread_id = thread_id
+        # Username of the user who started the run. Only the owner may poll,
+        # resume or clear it.
+        self.owner = owner
         self.status = "running"  # running | waiting_approval | complete | error
         self.logs: List[str] = []
         self.pending_interrupt: Optional[Dict[str, Any]] = None
@@ -241,7 +294,7 @@ class Session:
         self.error: Optional[str] = None
         self.matched_files: List[str] = []
         self.run_input: Optional[Dict[str, Any]] = None
-        self.token_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0} # <--- Added
+        self.token_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         self._lock = threading.Lock()
         self.created_at = time.monotonic()
         self.finished_at: Optional[float] = None
@@ -270,7 +323,7 @@ class Session:
             summary=self.summary,
             changed_files=list(self.changed_files),
             error=self.error,
-            token_usage=dict(self.token_usage), # <--- Pass token usage to status
+            token_usage=dict(self.token_usage),
         )
 
 
@@ -284,15 +337,31 @@ def _get_session(thread_id: str) -> Optional[Session]:
         return _sessions.get(thread_id)
 
 
+def _get_owned_session(thread_id: str, user: Dict[str, Any]) -> Session:
+    """Return the session if it exists and belongs to ``user``; otherwise 404.
+
+    A 404 (rather than 403) is returned for foreign threads so callers cannot
+    probe which thread ids exist.
+    """
+    session = _get_session(thread_id)
+    if session is None or session.owner != user["uname"]:
+        raise HTTPException(status_code=404, detail="Unknown thread_id.")
+    return session
+
+
 def _store_session(session: Session) -> None:
     with _sessions_lock:
         _sessions[session.thread_id] = session
         _evict_sessions_locked()
 
 
-def _remove_session(thread_id: str) -> bool:
+def _remove_session(thread_id: str, owner: Optional[str] = None) -> bool:
     with _sessions_lock:
-        return _sessions.pop(thread_id, None) is not None
+        session = _sessions.get(thread_id)
+        if session is None or (owner is not None and session.owner != owner):
+            return False
+        del _sessions[thread_id]
+        return True
 
 
 def _evict_sessions_locked() -> None:
@@ -364,7 +433,7 @@ def _run_agent_in_background(
                 session.status = "complete"
                 session.summary = result.get("summary")
                 session.changed_files = list(result.get("changed_files") or [])
-                session.token_usage = result.get("token_usage", {}) # <--- Update session token usage
+                session.token_usage = result.get("token_usage", {})
                 session.pending_interrupt = None
                 session.mark_finished()
                 metric_collector.record(
@@ -375,6 +444,7 @@ def _run_agent_in_background(
                     duration_seconds=session.finished_at - session.created_at,
                     status="success",
                     thread_id=session.thread_id,
+                    uname=session.owner,
                 )
 
     except WorkspaceError as exc:
@@ -415,7 +485,7 @@ def index(request: Request) -> HTMLResponse:
 
 
 @app.post("/api/run", response_model=RunResponse)
-def start_run(payload: RunRequest) -> RunResponse:
+def start_run(payload: RunRequest, user: Dict[str, Any] = Depends(_current_user)) -> RunResponse:
     root = payload.root.strip()
     task = payload.task.strip()
     raw_files = [line.strip() for line in payload.files if line.strip()]
@@ -426,6 +496,8 @@ def start_run(payload: RunRequest) -> RunResponse:
         raise HTTPException(status_code=400, detail="At least one file or file pattern is required.")
     if not task:
         raise HTTPException(status_code=400, detail="Task is required.")
+
+    _assert_root_allowed(root, user)
 
     try:
         files = expand_file_patterns(root, raw_files)
@@ -439,7 +511,7 @@ def start_run(payload: RunRequest) -> RunResponse:
         )
 
     thread_id = uuid4().hex
-    session = Session(thread_id)
+    session = Session(thread_id, owner=user["uname"])
     session.matched_files = list(files)
     session.run_input = {"root": root, "files": files, "task": task, "thread_id": thread_id}
     _store_session(session)
@@ -459,10 +531,12 @@ def start_run(payload: RunRequest) -> RunResponse:
 
 
 @app.post("/api/resume/{thread_id}", response_model=RunResponse)
-def resume_run_thread(thread_id: str, payload: ResumeRequest) -> RunResponse:
-    session = _get_session(thread_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="No active run to resume.")
+def resume_run_thread(
+    thread_id: str,
+    payload: ResumeRequest,
+    user: Dict[str, Any] = Depends(_current_user),
+) -> RunResponse:
+    session = _get_owned_session(thread_id, user)
 
     # Atomically claim the resume so two concurrent /api/resume calls on the
     # same thread cannot both spawn an agent thread. The claim is released
@@ -491,29 +565,35 @@ def resume_run_thread(thread_id: str, payload: ResumeRequest) -> RunResponse:
 
 
 @app.get("/api/status/{thread_id}", response_model=StatusResponse)
-def get_status(thread_id: str, since: int = 0) -> StatusResponse:
-    session = _get_session(thread_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Unknown thread_id.")
+def get_status(
+    thread_id: str,
+    since: int = 0,
+    user: Dict[str, Any] = Depends(_current_user),
+) -> StatusResponse:
+    session = _get_owned_session(thread_id, user)
     with session._lock:
         return session.to_status(since=since)
 
 
 @app.get("/api/metrics")
-def get_metrics(limit: int = 50) -> Dict[str, Any]:
-    """Return the most recent collected metrics, newest first."""
-    return {"metrics": metric_collector.get_metrics(limit=limit)}
+def get_metrics(limit: int = 50, user: Dict[str, Any] = Depends(_current_user)) -> Dict[str, Any]:
+    """Return the caller's most recent collected metrics, newest first."""
+    mine = [
+        m for m in metric_collector.get_metrics(limit=MAX_BUFFERED_METRICS)
+        if m.get("uname") == user["uname"]
+    ]
+    return {"metrics": mine[:limit]}
 
 
 @app.post("/api/clear/{thread_id}")
-def clear_session(thread_id: str) -> Dict[str, str]:
-    if not _remove_session(thread_id):
+def clear_session(thread_id: str, user: Dict[str, Any] = Depends(_current_user)) -> Dict[str, str]:
+    if not _remove_session(thread_id, owner=user["uname"]):
         raise HTTPException(status_code=404, detail="Unknown thread_id.")
     return {"thread_id": thread_id, "status": "cleared"}
 
 
 @app.post("/api/llm")
-def ask_llm(payload: LLMRequest) -> StreamingResponse:
+def ask_llm(payload: LLMRequest, user: Dict[str, Any] = Depends(_current_user)) -> StreamingResponse:
     prompt = payload.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required.")

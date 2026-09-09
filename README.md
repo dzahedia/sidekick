@@ -1,6 +1,6 @@
 # Local Coding Agent
 
-> **Version 1.0** — see [Changelog](#changelog) for release history.
+> **Version 1.1** — see [Changelog](#changelog) for release history.
 
 This is a **highly focused** coding agent that operates exclusively on a small, explicitly selected set of files provided by the user. By limiting its scope, it keeps token usage **low and predictable** while enabling precise, targeted edits.
 
@@ -18,6 +18,12 @@ In addition to the full agent run **for convenience**, you can also **ask the LL
 
 ```bash
 uv sync
+```
+
+This installs the runtime dependencies plus the `dev` group (pytest, httpx). Run the test suite with:
+
+```bash
+uv run pytest
 ```
 
 ## Run
@@ -53,7 +59,13 @@ When the run finishes, a **results** section appears with:
 
 ## User Management
 
-Users can register themselves through the application, but they must be activated by an administrator before they can gain access. Additionally, each user must provide a folder name during registration; all root directories they use must start with this folder name.
+Users can register themselves through the application, but they must be activated by an administrator before they can gain access. Additionally, each user must provide a folder during registration; every root directory they run the agent against must be that folder or a directory inside it. The server enforces this on resolved paths, so `..` segments and symlinks cannot be used to escape.
+
+### Authentication
+
+`POST /api/login` returns a Bearer token. Every `/api/*` route except `register`, `login` and `logout` requires it in the `Authorization: Bearer <token>` header and returns `401` otherwise. Tokens are kept in memory and are invalidated by `POST /api/logout` or a server restart. Agent runs are bound to the user who started them: another user's `status`, `resume` and `clear` calls on that thread return `404`, and `/api/metrics` only returns the caller's own runs.
+
+On first start the app seeds a default `admin` / `admin1234` account whose folder is the installed package directory. Change or remove that account before exposing the service beyond localhost.
 
 To activate a user (add them to the whitelist), you can run the `add_active_user.py` script:
 
@@ -73,6 +85,7 @@ The agent is built on top of a large language model (LLM) and needs credentials 
 | `LLM_BASE_URL` | Base URL of the LLM endpoint, useful for proxies or self-hosted models.        |
 | `LLM_MODEL` | Model name to use (e.g. `qwen3.8:30b`). Defaults to a sensible built-in value. |
 | `APPROVE_FILE_CREATION` | When set to `t` or `true`, file creation is auto-approved (no manual approval prompt). |
+| `SIDEKICK_DB_PATH` | Path of the SQLite user database. Defaults to `src/sidekick/api/users.db`. |
 
 ## .env for local model
 LLM_API_KEY=ollama
@@ -102,5 +115,6 @@ Token usage is tracked per run and reported in the `token_usage` field of the st
 
 - **0.5** — Initial release.
 - **0.75** — Added direct LLM call (no agent loop).
-- **1.0** — Added user managment.
+- **1.0** — Added user management.
+- **1.1** — API routes require a login token; workspace roots are restricted to the user's registered folder; runs are private to their owner; fixed "Changed files" not listing edited files; dropped the unused Streamlit dependency.
 

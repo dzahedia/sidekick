@@ -8,14 +8,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sidekick.agent import graph as graph_module
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.graph import END
+
 from sidekick.agent.graph import (
+    _collect_changed_files,
     _describe_tool_call,
     _make_gate,
     _post_gate,
     _route,
     build_graph,
 )
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +34,7 @@ def _ai_with_tool_calls(*calls):
 
 def test_route_returns_end_when_no_tool_calls():
     state = {"messages": [HumanMessage(content="hi")]}
-    assert _route(state) == "END"
+    assert _route(state) == END
 
 
 def test_route_returns_tools_for_non_create_tool_calls():
@@ -58,7 +61,7 @@ def test_route_handles_missing_tool_calls_attr():
     # No tool_calls attribute at all
     del msg.tool_calls
     state = {"messages": [msg]}
-    assert _route(state) == "END"
+    assert _route(state) == END
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +205,7 @@ def test_gate_treats_truthy_env_values_as_approval(monkeypatch):
         ("edit_file", {"path": "foo.py"}, "Editing foo.py"),
         ("search_file", {"path": "foo.py"}, "Searching foo.py"),
         ("unknown_tool", {"path": "foo.py"}, "Using tool unknown_tool"),
-        ("create_file", {"path": "foo.py"}, "Using tool create_file"),
+        ("create_file", {"path": "foo.py"}, "Creating foo.py"),
     ],
 )
 def test_describe_tool_call(name, args, expected):
@@ -216,6 +219,69 @@ def test_describe_tool_call_defaults_missing_fields():
 def test_describe_tool_call_handles_missing_args():
     call = {"name": "read_file"}
     assert _describe_tool_call(call) == "Reading "
+
+
+# ---------------------------------------------------------------------------
+# _collect_changed_files
+# ---------------------------------------------------------------------------
+
+
+def _tool_call(name, path, call_id):
+    return {"name": name, "args": {"path": path}, "id": call_id}
+
+
+def test_collect_changed_files_returns_empty_for_missing_state():
+    assert _collect_changed_files(None) == []
+    assert _collect_changed_files({}) == []
+
+
+def test_collect_changed_files_includes_successful_edits_and_creates():
+    ai = AIMessage(
+        content="",
+        tool_calls=[_tool_call("edit_file", "a.py", "c1"), _tool_call("create_file", "b.py", "c2")],
+    )
+    state = {
+        "messages": [
+            ai,
+            ToolMessage(content="Edited a.py successfully.", name="edit_file", tool_call_id="c1"),
+            ToolMessage(content="Created file b.py successfully.", name="create_file", tool_call_id="c2"),
+        ]
+    }
+    assert _collect_changed_files(state) == ["a.py", "b.py"]
+
+
+def test_collect_changed_files_skips_failed_and_non_mutating_tools():
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            _tool_call("edit_file", "a.py", "c1"),
+            _tool_call("read_file", "r.py", "c2"),
+            _tool_call("create_file", "b.py", "c3"),
+        ],
+    )
+    state = {
+        "messages": [
+            ai,
+            ToolMessage(content="error: old text was not found.", name="edit_file", tool_call_id="c1"),
+            ToolMessage(content="file body", name="read_file", tool_call_id="c2"),
+            ToolMessage(content="The user rejected this file creation request.", name="create_file", tool_call_id="c3"),
+        ]
+    }
+    assert _collect_changed_files(state) == []
+
+
+def test_collect_changed_files_dedupes_repeated_edits():
+    ai1 = AIMessage(content="", tool_calls=[_tool_call("edit_file", "a.py", "c1")])
+    ai2 = AIMessage(content="", tool_calls=[_tool_call("edit_file", "a.py", "c2")])
+    state = {
+        "messages": [
+            ai1,
+            ToolMessage(content="Edited a.py successfully.", name="edit_file", tool_call_id="c1"),
+            ai2,
+            ToolMessage(content="Edited a.py successfully.", name="edit_file", tool_call_id="c2"),
+        ]
+    }
+    assert _collect_changed_files(state) == ["a.py"]
 
 
 # ---------------------------------------------------------------------------

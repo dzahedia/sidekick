@@ -25,6 +25,42 @@ let pollTimer = null;
 let logOffset = 0; // cursor: how many log lines we've already rendered
 let metricsTimer = null;
 
+function loadUser() {
+    try {
+        const raw = sessionStorage.getItem("sidekick_user");
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+function redirectToLogin() {
+    stopPolling();
+    if (metricsTimer) {
+        clearInterval(metricsTimer);
+        metricsTimer = null;
+    }
+    sessionStorage.removeItem("sidekick_user");
+    window.location.replace("/");
+}
+
+// fetch() wrapper for /api/* calls: attaches the Bearer token from the stored
+// session and sends the user back to the login page when the server says the
+// token is no longer valid.
+async function apiFetch(url, options = {}) {
+    const user = loadUser();
+    const headers = Object.assign({}, options.headers || {});
+    if (user && user.token) {
+        headers["Authorization"] = `Bearer ${user.token}`;
+    }
+    const res = await fetch(url, Object.assign({}, options, { headers }));
+    if (res.status === 401) {
+        redirectToLogin();
+        throw new Error("Your session has expired. Please log in again.");
+    }
+    return res;
+}
+
 function showError(message) {
     errorEl.textContent = message;
     errorEl.hidden = false;
@@ -137,7 +173,7 @@ function renderMetrics(metrics) {
 
 async function refreshMetrics() {
     try {
-        const res = await fetch("/api/metrics");
+        const res = await apiFetch("/api/metrics");
         if (!res.ok) return;
         const body = await res.json();
         renderMetrics(body.metrics || []);
@@ -177,7 +213,7 @@ function pollStatus(threadId) {
     logOffset = 0;
     pollTimer = setInterval(async () => {
         try {
-            const res = await fetch(`/api/status/${threadId}?since=${logOffset}`);
+            const res = await apiFetch(`/api/status/${threadId}?since=${logOffset}`);
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Status request failed (${res.status})`);
@@ -216,7 +252,7 @@ async function startRun() {
         const oldThreadId = currentThreadId;
         currentThreadId = null;
         try {
-            await fetch(`/api/clear/${oldThreadId}`, { method: "POST" });
+            await apiFetch(`/api/clear/${oldThreadId}`, { method: "POST" });
         } catch {
             // Best effort: a stale session is harmless if it can't be removed.
         }
@@ -235,7 +271,7 @@ async function startRun() {
     setRunning(true);
 
     try {
-        const res = await fetch("/api/run", {
+        const res = await apiFetch("/api/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -261,7 +297,7 @@ async function sendDecision(decision) {
     updateStatusLabel("running");
 
     try {
-        const res = await fetch(`/api/resume/${currentThreadId}`, {
+        const res = await apiFetch(`/api/resume/${currentThreadId}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ decision }),
@@ -285,7 +321,7 @@ async function startLLM() {
         const oldThreadId = currentThreadId;
         currentThreadId = null;
         try {
-            await fetch(`/api/clear/${oldThreadId}`, { method: "POST" });
+            await apiFetch(`/api/clear/${oldThreadId}`, { method: "POST" });
         } catch {
             // Best effort: a stale session is harmless if it can't be removed.
         }
@@ -295,7 +331,7 @@ async function startLLM() {
     setRunning(true);
 
     try {
-        const res = await fetch("/api/llm", {
+        const res = await apiFetch("/api/llm", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ prompt: taskInput.value }),
@@ -380,13 +416,7 @@ function restoreSession() {
 async function handleLogout() {
     // Read the stored session so we can send the token to the server and
     // clear every piece of user data we persisted locally.
-    let user = null;
-    try {
-        const raw = sessionStorage.getItem("sidekick_user");
-        if (raw) user = JSON.parse(raw);
-    } catch {
-        user = null;
-    }
+    const user = loadUser();
 
     try {
         const headers = {};

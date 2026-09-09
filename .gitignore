@@ -7,3 +7,5 @@ __pycache__/
 todos.txt
 **.zip
 **.db
+.DS_Store
+*.iml

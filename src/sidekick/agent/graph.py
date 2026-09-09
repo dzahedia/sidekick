@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage,AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -20,6 +20,10 @@ from sidekick.models.qwen import get_model
 # the app when the user clicks Approve/Reject; recreating MemorySaver inside
 # ``build_graph`` would discard the interrupted checkpoint before that rerun.
 _CHECKPOINTER = MemorySaver()
+
+# Tool result recorded when the user rejects a create_file request. Exposed so
+# callers can tell a rejected creation apart from a successful one.
+REJECTED_CREATION_MESSAGE = "The user rejected this file creation request."
 
 
 def _route(state: AgentState) -> str:
@@ -82,7 +86,7 @@ def _make_gate(workspace: Workspace):
                 except WorkspaceError as exc:
                     result = f"error: {exc}"
             else:
-                result = "The user rejected this file creation request."
+                result = REJECTED_CREATION_MESSAGE
             messages.append(
                 ToolMessage(
                     content=result,
@@ -160,7 +164,47 @@ def _describe_tool_call(call: dict) -> str:
         return f"Editing {path}"
     if name == "search_file":
         return f"Searching {path}"
+    if name == "create_file":
+        return f"Creating {path}"
     return f"Using tool {name}"
+
+
+def _collect_changed_files(final_state) -> list[str]:
+    """Return the paths of files that were actually edited or created.
+
+    A tool call in an AI message only shows intent; the tool may have failed
+    (e.g. edit_file when ``old`` is not found exactly once). A file is only
+    counted as changed when its ToolMessage result does not carry the
+    ``error:`` prefix that the tools use to signal failure.
+
+    ToolMessages do not carry the tool arguments, so the path is recovered from
+    the matching assistant tool call via ``tool_call_id``.
+    """
+    if not final_state or "messages" not in final_state:
+        return []
+
+    messages = final_state["messages"]
+    call_paths: dict[str, str] = {}
+    for msg in messages:
+        for call in getattr(msg, "tool_calls", None) or []:
+            call_id = call.get("id")
+            if call_id:
+                call_paths[call_id] = (call.get("args", {}) or {}).get("path", "")
+
+    changed: list[str] = []
+    for msg in messages:
+        call_id = getattr(msg, "tool_call_id", None)
+        if call_id is None:
+            continue
+        if getattr(msg, "name", "") not in ("edit_file", "create_file"):
+            continue
+        content = str(getattr(msg, "content", "") or "")
+        if content.startswith("error:") or content == REJECTED_CREATION_MESSAGE:
+            continue
+        path = call_paths.get(call_id)
+        if path and path not in changed:
+            changed.append(path)
+    return changed
 
 
 def run_agent(
@@ -232,36 +276,7 @@ def run_agent(
     if on_event and not pending_interrupt:
         on_event("Finished")
 
-    # A tool call in a message only shows intent; the tool may have failed
-    # (e.g. edit_file when `old` is not found exactly once). Only count a file
-    # as changed when its tool result indicates success. The tools return a
-    # structured signal: a successful edit/create returns a plain message, while
-    # a failure returns an "error:"-prefixed message. We key off that signal
-    # rather than a fragile prefix heuristic on the message text.
-    changed: list[str] = []
-    if final_state and "messages" in final_state:
-        for msg in final_state["messages"]:
-            if getattr(msg, "tool_call_id", None) is None:
-                continue
-            name = getattr(msg, "name", "")
-            if name not in ("edit_file", "create_file"):
-                continue
-            content = str(getattr(msg, "content", "") or "")
-            if content.startswith("error:"):
-                continue
-            # edit_file results may carry the path in args. For create_file,
-            # recover it from the matching assistant tool call.
-            path = getattr(msg, "args", {}).get("path")
-            if not path and name == "create_file":
-                for prior in final_state["messages"]:
-                    for call in (getattr(prior, "tool_calls", None) or []):
-                        if call.get("id") == msg.tool_call_id:
-                            path = (call.get("args", {}) or {}).get("path")
-                            break
-                    if path:
-                        break
-            if path and path not in changed:
-                changed.append(path)
+    changed = _collect_changed_files(final_state)
 
     total_input = 0
     total_output = 0
@@ -292,17 +307,6 @@ def run_agent(
             else None
         ),
         "changed_files": changed,
-        "token_usage": token_usage,  # <--- Added token metrics output
-        "state": final_state,
-    }
-    if False:
-        return {
-        "pending_interrupt": pending_interrupt,
-        "summary": (
-            final_state["messages"][-1].content
-            if (final_state and final_state.get("messages") and not pending_interrupt)
-            else None
-        ),
-        "changed_files": changed,
+        "token_usage": token_usage,
         "state": final_state,
     }
